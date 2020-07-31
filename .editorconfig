@@ -1,0 +1,12 @@
+root = true
+
+[*]
+indent_style = space
+trim_trailing_whitespace = true
+
+[*.{h,c}]
+indent_size = 4
+
+[*.tcl]
+indent_size = 4
+
