@@ -12,4 +12,7 @@ the embedded window.
 
 There are bugs.
 
+Apt Modules:
+  gstreamer1.0-plugins-good
+
 Needs gstreamer-video-1.0 which is provided by the apt package libgstreamer-plugins-base1.0-dev

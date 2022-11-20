@@ -3,6 +3,7 @@
 #include <gst/video/videooverlay.h>
 #include <gst/video/navigation.h>
 #include <gst/video/colorbalance.h>
+#include <gst/gstparse.h>
 #include <string.h>
 
 #define DEF_VIDEO_BACKGROUND   "white"
@@ -15,6 +16,7 @@
 #define DEF_VIDEO_TAKE_FOCUS   "0"
 #define DEF_VIDEO_OUTPUT       ""
 #define DEF_VIDEO_ANCHOR       "center"
+#define DEF_VIDEO_DEVICE       "/dev/video0"
 
 #define VIDEO_SOURCE_CHANGED   0x01
 #define VIDEO_GEOMETRY_CHANGED 0x02
@@ -31,6 +33,8 @@ static Tk_OptionSpec optionSpec[] = {
         DEF_VIDEO_HEIGHT, Tk_Offset(WidgetData, heightPtr), -1, 0, 0, VIDEO_GEOMETRY_CHANGED},
     {TK_OPTION_STRING, "-width", "width", "Width",
         DEF_VIDEO_WIDTH, Tk_Offset(WidgetData, widthPtr), -1, 0, 0, VIDEO_GEOMETRY_CHANGED},
+    {TK_OPTION_STRING, "-device", "device", "Device",
+        DEF_VIDEO_DEVICE, Tk_Offset(WidgetData, devicePtr), -1, 0, 0, 0},
     {TK_OPTION_END, (char *)NULL, (char *)NULL, (char*)NULL,
         (char *)NULL, 0, 0, 0, 0}
 };
@@ -142,7 +146,7 @@ static int GstWidgetBalanceCmd(ClientData clientData, Tcl_Interp *interp, int ob
 static int GstWidgetDevicesCmd(ClientData clientData, Tcl_Interp *interp, int objc, Tcl_Obj *CONST objv[])
 {
     if (objc != 2) {
-        Tcl_WrongNumArgs(interp, 1, objv, "devices");
+        Tcl_WrongNumArgs(interp, 1, objv, "devices"); // TODO: add category audio|video to select source types.
         return TCL_ERROR;
     }
     WidgetData *dataPtr = (WidgetData *)clientData;
@@ -155,12 +159,28 @@ static int GstWidgetDevicesCmd(ClientData clientData, Tcl_Interp *interp, int ob
         gchar *name = gst_device_get_display_name(device);
         gchar *devclass = gst_device_get_device_class(device);
         GstCaps *caps = gst_device_get_caps(device);
-        GST_LOG ("caps are %" GST_PTR_FORMAT, caps);
+        {
+            gchar *capsstr = gst_caps_serialize(caps, GST_SERIALIZE_FLAG_NONE);
+            g_message("caps: %s\n", capsstr);
+            g_free(capsstr);
+        }
+        GstStructure *props = gst_device_get_properties(device);
+        const gchar *device_path = gst_structure_get_string(props, "device.path");
+        {
+            gchar *propsstr = gst_structure_serialize(props, GST_SERIALIZE_FLAG_NONE);
+            g_message("device props: %s\n", propsstr);
+            g_free(propsstr);
+        }
+
         Tcl_Obj *devObj = Tcl_NewListObj(0, NULL);
-        Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("name", -1));
+        Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("name", 4));
         Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj(name, -1));
-        Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("device_class", -1));
+        Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("device_class", 12));
         Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj(devclass, -1));
+        Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj("path", 4));
+        Tcl_ListObjAppendElement(interp, devObj, Tcl_NewStringObj(device_path, -1));
+
+        gst_structure_free(props);
         g_free(name);
         g_free(devclass);
         Tcl_ListObjAppendElement(interp, resultObj, devObj);
@@ -186,8 +206,27 @@ static GData *GetColorBalanceChannelMap(GstPipeline *pipeline)
     return channelMap;
 }
 
-static GstPipeline *CreateVideoPipeline(const gchar *name, guintptr window_id)
+static GstPipeline *CreateVideoPipeline(WidgetData *dataPtr, const gchar *name, guintptr window_id)
 {
+    const char *desc = "v4l2src device=%s ! videoconvert ! videoscale ! videobalance ! xvimagesink";
+    Tcl_Obj *descObj = Tcl_ObjPrintf(desc, Tcl_GetString(dataPtr->devicePtr));
+
+    GError *err = NULL;
+    GstParseFlags flags = GST_PARSE_FLAG_NONE;
+    GstParseContext *parseContext = gst_parse_context_new();
+    GstElement *parsed = gst_parse_launch_full(Tcl_GetString(descObj), parseContext, flags, &err);
+    gst_parse_context_free(parseContext);
+    if (err) {
+        GST_ERROR("pipeline error: %s\n", err->message);
+        g_error_free(err);
+        return NULL;
+    }
+    GstElement *sink = gst_bin_get_by_interface(GST_BIN(parsed), GST_TYPE_VIDEO_OVERLAY);
+    //GstElement *sink = gst_bin_get_by_name(GST_BIN(parsed), "sink");
+    gst_video_overlay_set_window_handle (GST_VIDEO_OVERLAY (sink), window_id);
+    GstPipeline *pipeline = GST_PIPELINE(parsed);
+
+#ifdef MANUAL_CONSTRUCTION
     GstPipeline *pipeline = GST_PIPELINE(gst_pipeline_new(name));
 
     // TODO: select video device from config.
@@ -202,7 +241,7 @@ static GstPipeline *CreateVideoPipeline(const gchar *name, guintptr window_id)
     gst_bin_add_many (GST_BIN (pipeline), src, cnv, scale, bal, sink, NULL);
     gst_element_link_many (src, cnv, scale, bal, sink, NULL);
     gst_video_overlay_set_window_handle (GST_VIDEO_OVERLAY (sink), window_id);
-
+#endif
     return pipeline;
 }
 
@@ -217,12 +256,16 @@ static int GstWidgetPlayCmd(ClientData clientData, Tcl_Interp *interp, int objc,
     }
     GstPipeline *pipeline = (GstPipeline *)dataPtr->platformData;
     if (pipeline == NULL) {
-        pipeline = CreateVideoPipeline(Tk_Name(dataPtr->tkwin), Tk_WindowId(dataPtr->tkwin));
+        pipeline = CreateVideoPipeline(dataPtr, Tk_Name(dataPtr->tkwin), Tk_WindowId(dataPtr->tkwin));
+    }
+    if (pipeline != NULL) {
         dataPtr->platformData = (ClientData)pipeline;
         // Register the pipeline bus with the Tcl notifier
         GstBus *bus = gst_pipeline_get_bus(pipeline);
         packagePtr->busses = g_list_append(packagePtr->busses, bus);
         dataPtr->channelMap = (ClientData)GetColorBalanceChannelMap(pipeline);
+    } else {
+        return TCL_ERROR;
     }
 
     GstStateChangeReturn r = gst_element_set_state(GST_ELEMENT(pipeline), GST_STATE_PLAYING);
@@ -567,7 +610,6 @@ static int EventProc(Tcl_Event *evPtr, int flags)
                             gint button = 0;
                             gdouble x = 0, y = 0;
                             const gchar *keys = NULL;
-                            GstNavigationCommand cmd = 0;
 
                             switch (gst_navigation_event_get_type(ge))
                             {
@@ -606,9 +648,21 @@ static int EventProc(Tcl_Event *evPtr, int flags)
                     g_message("gst state-changed %d -> %d pending %d", oldstate, newstate, pending);
                 }
                 break;
+            case GST_MESSAGE_ERROR:
+                {
+                    GError *err = NULL;
+                    gchar *debugInfo = NULL;
+                    gst_message_parse_error(message, &err, &debugInfo);
+                    g_message("error from '%s': %s", GST_OBJECT_NAME(message->src), err->message);
+                    if (debugInfo) {
+                        g_message("%s", debugInfo);
+                    }
+                    g_error_free(err);
+                    g_free(debugInfo);
+                }
+                break;
             case GST_MESSAGE_EOS:
             case GST_MESSAGE_WARNING:
-            case GST_MESSAGE_ERROR:
                 //Tcl_QueueEvent(TkGstErrEvent, TCL_QUEUE_TAIL);
                 //break;
             default:

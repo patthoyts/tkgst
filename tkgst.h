@@ -23,6 +23,7 @@ typedef struct {
     Tcl_Obj  *anchorPtr;
     Tk_Anchor anchor;
     Tcl_Obj  *bgPtr;
+    Tcl_Obj  *devicePtr;
 
     ClientData packageData;
     ClientData platformData;

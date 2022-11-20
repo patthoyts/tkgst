@@ -1,7 +1,14 @@
+# Demonstrate simple use of tkgst video widget
+#
+# eg: tkcon -master .tkcon -eval '' -- source ../demo.tcl
+#
+
 package require Tcl 8.6
 package require Tk 8.6
 
-set auto_path [linsert $auto_path 0 [pwd]/build]
+set build_path [file normalize [file join [file dirname [info script]] build]]
+set auto_path [linsert $auto_path 0 $build_path]
+
 package require tkgst 0.1.0
 
 proc Exit {} {
@@ -14,11 +21,24 @@ proc Devices {gst} {
     }
 }
 
-proc OnBalance {gst op value} {
+proc OnBalance {scalew labelw gst op value} {
     $gst balance $op $value
+    SetScaleLabel $scalew $labelw $value
 }
 
-proc Main {} {
+# called from variable trace on the scale widget
+proc SetScaleLabel {scalew labelw value} {
+    $labelw configure -text [format {%.1f} $value]
+    foreach {x y} [$scalew coords] break
+    foreach {sw sh sx sy} [split [winfo geometry $scalew] {x +}] break
+    set tw [winfo width $labelw]
+    set x [expr {$x - ($tw / 2)}]
+    if {$x < $sx} {set x $sx}
+    if {$x + $tw > $sx + $sw} {set x [expr {$sx + $sw - $tw}]}
+    place $labelw -x $x -y [expr {$sy - [winfo height $labelw]}]
+}
+
+proc Main {{args {}}} {
     variable forever 0
 
     wm geometry . 800x600
@@ -26,11 +46,16 @@ proc Main {} {
 
     set f [ttk::frame .f]
     set gst [gst $f.gst -width 640 -height 480 -background black]
+    if {$args ne {}} {
+        $gst configure -device [lindex $args 0]
+    }
+
     set box [ttk::frame $f.box]
     foreach name {brightness contrast saturation hue} {
         set label[set name] [ttk::label $box.label$name -text "${name}:"]
+        ttk::label $box.val$name -text ""
         set $name [ttk::scale $box.$name -from -1000 -to 1000 -length 100 -value 0 \
-            -command "OnBalance $gst -$name"]
+            -command "OnBalance $box.$name $box.val$name $gst -$name"]
     }
     set play [ttk::button $box.play -text "Play" -command [list $gst play]]
     set pause [ttk::button $box.pause -text "Pause" -command [list $gst pause]]
@@ -63,4 +88,4 @@ proc Main {} {
     destroy .
 }
 
-Main
+Main $argv
